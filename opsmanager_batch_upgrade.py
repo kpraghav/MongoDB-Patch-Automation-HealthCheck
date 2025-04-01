@@ -3,8 +3,12 @@ import csv
 import logging
 import argparse
 
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     handlers=[logging.FileHandler("upgrade_success.log"), logging.StreamHandler()])
+error_log = logging.FileHandler("upgrade_error.log")
+error_log.setLevel(logging.ERROR)
+logging.getLogger().addHandler(error_log)
 
 BASE_URL = "https://<ops-manager-url>/api/public/v1.0"
 AUTH = ("<your-username>", "<your-password>")
@@ -12,20 +16,21 @@ HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 def upgrade_group(group_id, version):
     """Upgrades a group to a specified MongoDB version."""
-    response = requests.get(f"{BASE_URL}/groups/{group_id}/automationConfig", headers=HEADERS, auth=AUTH)
-    response.raise_for_status()
+    try:
+        response = requests.get(f"{BASE_URL}/groups/{group_id}/automationConfig", headers=HEADERS, auth=AUTH)
+        response.raise_for_status()
 
-    config = response.json()
-    config["version"] += 1  
-    for process in config.get("processes", []):
-        process["version"] = version
+        config = response.json()
+        config["version"] += 1  
+        for process in config.get("processes", []):
+            process["version"] = version
 
-    response = requests.put(f"{BASE_URL}/groups/{group_id}/automationConfig", headers=HEADERS, auth=AUTH, json=config)
-    
-    if response.status_code == 200:
+        response = requests.put(f"{BASE_URL}/groups/{group_id}/automationConfig", headers=HEADERS, auth=AUTH, json=config)
+        response.raise_for_status()
+
         logging.info(f"Upgrade successful for {group_id}")
-    else:
-        logging.error(f"Upgrade failed for {group_id}: {response.text}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Upgrade failed for {group_id}: {e}")
 
 def upgrade_batch(batch_file, version):
     with open(batch_file, mode="r") as file:
