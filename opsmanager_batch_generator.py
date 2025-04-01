@@ -3,6 +3,7 @@ import csv
 import logging
 import argparse
 
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                     handlers=[logging.FileHandler("batch_generator.log"), logging.StreamHandler()])
 
@@ -21,7 +22,7 @@ def check_health(group_id):
     response = requests.get(f"{BASE_URL}/groups/{group_id}/agents", headers=HEADERS, auth=AUTH)
     response.raise_for_status()
     unhealthy = [agent for agent in response.json()["results"] if agent["state"] != "ACTIVE"]
-    return len(unhealthy) == 0
+    return "Healthy" if len(unhealthy) == 0 else "Unhealthy"
 
 def generate_batches(batch_size):
     """Creates batch CSV files with health status."""
@@ -37,7 +38,7 @@ def generate_batches(batch_size):
             writer.writerow(["groupId", "health"])
 
             for group_id in batch:
-                writer.writerow([group_id, "Healthy" if check_health(group_id) else "Unhealthy"])
+                writer.writerow([group_id, check_health(group_id)])
         
         logging.info(f"Batch {i+1} created: {batch_file}")
 
