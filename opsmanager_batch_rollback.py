@@ -29,7 +29,14 @@ def load_backup_data():
     """Load backup data from JSON file."""
     try:
         with open(BACKUP_FILE, "r") as file:
-            return json.load(file)
+            backup_data = json.load(file)
+
+        if not isinstance(backup_data, list):
+            logging.error("Backup data is not in expected list format. Aborting.")
+            return None
+
+        return backup_data
+
     except Exception as e:
         logging.error(f"Failed to load backup file: {str(e)}")
         return None
@@ -40,9 +47,14 @@ def rollback(group_id, backup_data):
         logging.info(f"Rolling back Group ID: {group_id}")
 
         # Fetch original config from backup
-        original_config = next((item for item in backup_data if item['groupId'] == group_id), None)
+        original_config = next((item for item in backup_data if item.get('groupId') == group_id), None)
         if not original_config:
             logging.error(f"No backup found for Group {group_id}. Skipping rollback.")
+            return False
+
+        # Ensure automationConfig exists in backup
+        if "automationConfig" not in original_config:
+            logging.error(f"Backup for Group {group_id} is missing automationConfig. Skipping rollback.")
             return False
 
         # Restore automationConfig via API
@@ -52,10 +64,13 @@ def rollback(group_id, backup_data):
             auth=auth,
             json=original_config["automationConfig"]
         )
-        response.raise_for_status()
 
-        logging.info(f"Rollback successful for Group {group_id}")
-        return True
+        if response.status_code == 200:
+            logging.info(f"Rollback successful for Group {group_id}")
+            return True
+        else:
+            logging.error(f"Rollback failed for Group {group_id}: {response.text}")
+            return False
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Rollback failed for Group {group_id}: {str(e)}")
@@ -84,7 +99,7 @@ def main():
     # Load backup data
     backup_data = load_backup_data()
     if not backup_data:
-        logging.critical("Backup data missing. Aborting rollback.")
+        logging.critical("Backup data missing or corrupted. Aborting rollback.")
         return
 
     # Read Group IDs from batch file
