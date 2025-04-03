@@ -20,23 +20,35 @@ logging.basicConfig(
 
 # Load backup data
 def load_backup_data():
-    """Load backup data from JSON file and ensure correct format."""
+    """Load backup data from JSON file and detect its structure."""
     try:
         with open(BACKUP_FILE, "r") as file:
             backup_data = json.load(file)
 
+        # If backup has "results" key (expected format)
         if isinstance(backup_data, dict) and "results" in backup_data:
-            results = backup_data["results"]
-            if isinstance(results, list):
-                return results
-            else:
-                logging.error("Expected 'results' to be a list but found different format.")
-                return None
+            return {entry["groupId"]: entry["automationConfig"] for entry in backup_data["results"]}
+
+        # If backup is a dictionary with groupId as keys
+        elif isinstance(backup_data, dict):
+            return {gid: data["automationConfig"] for gid, data in backup_data.items() if "automationConfig" in data}
+
         else:
-            logging.error("Backup JSON does not contain expected 'results' key.")
+            logging.error("Backup JSON is in an unknown format.")
             return None
     except Exception as e:
         logging.error(f"Failed to load backup file: {str(e)}")
+        return None
+
+# Load batch file data
+def load_batch_file(batch_file):
+    """Load the batch file to get group IDs to rollback."""
+    try:
+        with open(batch_file, "r") as file:
+            group_ids = [line.strip().split(",")[0] for line in file.readlines()[1:]]  # Skip header
+        return set(group_ids)
+    except Exception as e:
+        logging.error(f"Failed to load batch file {batch_file}: {str(e)}")
         return None
 
 # Restore automation config
@@ -55,21 +67,28 @@ def rollback_group(group_id, config):
 # Main execution logic
 def main():
     parser = argparse.ArgumentParser(description="Rollback MongoDB Ops Manager automation config")
+    parser.add_argument("--batch_file", required=True, help="Path to the batch file containing group IDs for rollback")
     args = parser.parse_args()
 
+    # Load backup data
     backup_data = load_backup_data()
     if not backup_data:
         logging.critical("Backup data is not in expected format. Aborting rollback.")
         return
 
+    # Load batch file data
+    batch_group_ids = load_batch_file(args.batch_file)
+    if not batch_group_ids:
+        logging.critical("Batch file could not be loaded or is empty. Aborting rollback.")
+        return
+
     failed_rollbacks = []
 
-    for entry in backup_data:
-        group_id = entry.get("groupId")
-        automation_config = entry.get("automationConfig")
+    for group_id in batch_group_ids:
+        automation_config = backup_data.get(group_id)
 
-        if not group_id or not automation_config:
-            logging.error(f"Skipping entry with missing data: {entry}")
+        if not automation_config:
+            logging.warning(f"Skipping Group {group_id} - No backup data found")
             continue
 
         success = rollback_group(group_id, automation_config)
