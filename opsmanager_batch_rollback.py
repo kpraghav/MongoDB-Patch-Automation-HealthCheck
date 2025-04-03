@@ -1,128 +1,85 @@
 import requests
+import json
 import logging
 import argparse
-import json
-import csv
 from requests.auth import HTTPDigestAuth
 
-# Configure Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("rollback_log.log"),
-        logging.StreamHandler()
-    ]
-)
-
-# MongoDB Ops Manager API details
+# Constants
+BACKUP_FILE = "opsmanager_backup.json"
+LOG_FILE = "rollback_log.log"
 BASE_URL = "https://<ops-manager-url>/api/public/v1.0"
 USERNAME = "<your-username>"
 PASSWORD = "<your-password>"
-auth = HTTPDigestAuth(USERNAME, PASSWORD)
 
-# Paths
-BACKUP_FILE = "opsmanager_backup.json"  # Backup data for rollback
-ROLLBACK_STATUS_FILE = "rollback_status.csv"  # Rollback results
+# Configure Logging
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
+# Load backup data
 def load_backup_data():
-    """Load backup data from JSON file."""
+    """Load backup data from JSON file and ensure correct format."""
     try:
         with open(BACKUP_FILE, "r") as file:
             backup_data = json.load(file)
 
-        if not isinstance(backup_data, list):
-            logging.error("Backup data is not in expected list format. Aborting.")
+        if isinstance(backup_data, dict) and "results" in backup_data:
+            results = backup_data["results"]
+            if isinstance(results, list):
+                return results
+            else:
+                logging.error("Expected 'results' to be a list but found different format.")
+                return None
+        else:
+            logging.error("Backup JSON does not contain expected 'results' key.")
             return None
-
-        return backup_data
-
     except Exception as e:
         logging.error(f"Failed to load backup file: {str(e)}")
         return None
 
-def rollback(group_id, backup_data):
-    """Restore automationConfig for a given Group ID."""
+# Restore automation config
+def rollback_group(group_id, config):
+    """Send a PUT request to restore the group's automationConfig."""
+    url = f"{BASE_URL}/groups/{group_id}/automationConfig"
     try:
-        logging.info(f"Rolling back Group ID: {group_id}")
-
-        # Fetch original config from backup
-        original_config = next((item for item in backup_data if item.get('groupId') == group_id), None)
-        if not original_config:
-            logging.error(f"No backup found for Group {group_id}. Skipping rollback.")
-            return False
-
-        # Ensure automationConfig exists in backup
-        if "automationConfig" not in original_config:
-            logging.error(f"Backup for Group {group_id} is missing automationConfig. Skipping rollback.")
-            return False
-
-        # Restore automationConfig via API
-        response = requests.put(
-            f"{BASE_URL}/groups/{group_id}/automationConfig",
-            headers={"Content-Type": "application/json"},
-            auth=auth,
-            json=original_config["automationConfig"]
-        )
-
-        if response.status_code == 200:
-            logging.info(f"Rollback successful for Group {group_id}")
-            return True
-        else:
-            logging.error(f"Rollback failed for Group {group_id}: {response.text}")
-            return False
-
+        response = requests.put(url, auth=HTTPDigestAuth(USERNAME, PASSWORD), json=config)
+        response.raise_for_status()
+        logging.info(f"Successfully rolled back Group {group_id}")
+        return True
     except requests.exceptions.RequestException as e:
-        logging.error(f"Rollback failed for Group {group_id}: {str(e)}")
+        logging.error(f"Failed to roll back Group {group_id}: {str(e)}")
         return False
 
-def read_batch_file(batch_file):
-    """Read group IDs from the batch file."""
-    group_ids = []
-    try:
-        with open(batch_file, "r") as file:
-            reader = csv.reader(file)
-            next(reader)  # Skip header
-            for row in reader:
-                if row:
-                    group_ids.append(row[0])  # Assuming Group ID is in the first column
-    except Exception as e:
-        logging.error(f"Error reading batch file {batch_file}: {str(e)}")
-    
-    return group_ids
-
+# Main execution logic
 def main():
-    parser = argparse.ArgumentParser(description="MongoDB Ops Manager Batch Rollback Script")
-    parser.add_argument("--batch_file", required=True, help="CSV file containing batch Group IDs")
+    parser = argparse.ArgumentParser(description="Rollback MongoDB Ops Manager automation config")
     args = parser.parse_args()
 
-    # Load backup data
     backup_data = load_backup_data()
     if not backup_data:
-        logging.critical("Backup data missing or corrupted. Aborting rollback.")
+        logging.critical("Backup data is not in expected format. Aborting rollback.")
         return
 
-    # Read Group IDs from batch file
-    group_ids = read_batch_file(args.batch_file)
-    if not group_ids:
-        logging.critical(f"No valid Group IDs found in {args.batch_file}. Exiting.")
-        return
+    failed_rollbacks = []
 
-    rollback_results = []
+    for entry in backup_data:
+        group_id = entry.get("groupId")
+        automation_config = entry.get("automationConfig")
 
-    for group_id in group_ids:
-        success = rollback(group_id, backup_data)
-        rollback_results.append({"groupId": group_id, "status": "Success" if success else "Failed"})
+        if not group_id or not automation_config:
+            logging.error(f"Skipping entry with missing data: {entry}")
+            continue
 
-    # Write rollback results to CSV
-    try:
-        with open(ROLLBACK_STATUS_FILE, mode="w", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=["groupId", "status"])
-            writer.writeheader()
-            writer.writerows(rollback_results)
-        logging.info(f"Rollback status written to {ROLLBACK_STATUS_FILE}")
-    except Exception as e:
-        logging.error(f"Failed to write rollback status CSV: {str(e)}")
+        success = rollback_group(group_id, automation_config)
+        if not success:
+            failed_rollbacks.append({"groupId": group_id, "status": "Failed"})
+
+    if failed_rollbacks:
+        with open("rollback_failures.json", "w") as fail_file:
+            json.dump(failed_rollbacks, fail_file, indent=4)
+        logging.warning("Some rollbacks failed. Check rollback_failures.json.")
 
 if __name__ == "__main__":
     main()
