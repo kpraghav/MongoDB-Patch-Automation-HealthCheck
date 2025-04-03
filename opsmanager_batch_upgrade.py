@@ -1,49 +1,87 @@
 import requests
-import csv
 import logging
+import csv
 import argparse
+import time
+import json
+from requests.auth import HTTPDigestAuth
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
-                    handlers=[logging.FileHandler("upgrade_success.log"), logging.StreamHandler()])
-error_log = logging.FileHandler("upgrade_error.log")
-error_log.setLevel(logging.ERROR)
-logging.getLogger().addHandler(error_log)
+# Configure Logging
+logging.basicConfig(
+    filename="upgrade_log.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 BASE_URL = "https://<ops-manager-url>/api/public/v1.0"
-AUTH = ("<your-username>", "<your-password>")
-HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
+USERNAME = "<your-username>"
+PASSWORD = "<your-password>"
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
 
-def upgrade_group(group_id, version):
-    """Upgrades a group to a specified MongoDB version."""
-    try:
-        response = requests.get(f"{BASE_URL}/groups/{group_id}/automationConfig", headers=HEADERS, auth=AUTH)
-        response.raise_for_status()
+def get_automation_config(group_id):
+    """Fetch automation config for a group."""
+    url = f"{BASE_URL}/groups/{group_id}/automationConfig"
+    response = requests.get(url, headers=HEADERS, auth=HTTPDigestAuth(USERNAME, PASSWORD))
 
-        config = response.json()
-        config["version"] += 1  
-        for process in config.get("processes", []):
-            process["version"] = version
+    if response.status_code != 200:
+        logging.error(f"Failed to fetch automation config for {group_id}: {response.text}")
+        return None
 
-        response = requests.put(f"{BASE_URL}/groups/{group_id}/automationConfig", headers=HEADERS, auth=AUTH, json=config)
-        response.raise_for_status()
+    return response.json()
 
-        logging.info(f"Upgrade successful for {group_id}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Upgrade failed for {group_id}: {e}")
+def update_version(group_id, mongodb_version):
+    """Upgrade MongoDB version for a group."""
+    config = get_automation_config(group_id)
 
-def upgrade_batch(batch_file, version):
-    with open(batch_file, mode="r") as file:
+    if not config:
+        logging.error(f"Skipping Group {group_id} due to missing config")
+        return
+
+    if "processes" not in config or not config["processes"]:
+        logging.warning(f"No processes found for Group {group_id}, skipping upgrade.")
+        return
+
+    for process in config["processes"]:
+        if "version" in process:
+            logging.info(f"Updating {process['name']} in {group_id} to {mongodb_version}")
+            process["version"] = mongodb_version
+        else:
+            logging.warning(f"No version field in {process['name']} for Group {group_id}")
+
+    # Increment `automationConfig` version
+    if "version" in config:
+        config["version"] += 1
+    else:
+        logging.error(f"No 'version' field found in automationConfig for {group_id}, skipping.")
+        return
+
+    # Send updated config
+    url = f"{BASE_URL}/groups/{group_id}/automationConfig"
+    response = requests.put(url, headers=HEADERS, auth=HTTPDigestAuth(USERNAME, PASSWORD), json=config)
+
+    if response.status_code == 200:
+        logging.info(f"Upgrade successful for Group {group_id} to version {mongodb_version}")
+    else:
+        logging.error(f"Upgrade failed for Group {group_id}: {response.text}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Upgrade MongoDB for batch groups")
+    parser.add_argument("--file", required=True, help="Batch file to process")
+    parser.add_argument("--version", required=True, help="MongoDB version to upgrade to")
+    args = parser.parse_args()
+
+    with open(args.file, "r") as file:
         reader = csv.DictReader(file)
         for row in reader:
-            if row["health"] == "Healthy":
-                upgrade_group(row["groupId"], version)
+            group_id, health = row["GroupId"], row["Health"]
+
+            if health == "Healthy":
+                update_version(group_id, args.version)
             else:
-                logging.warning(f"Skipping {row['groupId']} due to poor health.")
+                logging.warning(f"Skipping upgrade for {group_id} due to poor health")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-file", required=True)
-    parser.add_argument("--version", required=True)
-    args = parser.parse_args()
-    upgrade_batch(args.batch_file, args.version)
+    main()
